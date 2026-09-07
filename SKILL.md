@@ -55,6 +55,20 @@ lead take codex      # 翻給 Codex 並 LOCKED；掛鉤自動：開看守期（�
 不用做事。裁判每 5 分鐘：CodexBar 讀到 Claude 5 小時窗用滿 → 寫證據 → 翻牌 CODEX → 開看守期 → Discord＋broadcast 通知。
 早上開工 SessionStart hook 端出翻牌史，然後跑 `lead reclaim`。
 
+### 2.5 翻牌那一刻，靠 Claude 的排程線會**靜默降級**，不會報錯（2026-09-07 實證，Charles 拍板記入）
+
+翻牌只管「誰當家」，**管不到正在跑的排程**。當日兩次撞 Claude 5 小時小窗（10:24、19:53），
+兩次都剛好撞上排程線發文的英文配圖步驟：翻譯呼叫 `claude -p` 回空字串 → 每張圖判「缺翻譯，跳過」
+→ 文章照發、方格子照發、Substack 照寄 → **英文版零張圖上線兩篇**（serenity 週報、macromusings），
+沒有任何警報，是 Charles 自己看到才知道。第二次備援已經接上 codex，卻撞到 Windows 裸 `codex` 找不到 `.cmd` 的洞，一樣回空。
+
+**翻牌／歸政之後第一件事，多做一項**：列出翻牌時段內跑過的、步驟裡有呼叫 Claude 的排程，逐一驗**產物**不驗 log：
+- 排程線發文（10:30／19:30／週一 10:00）：`cd C:/Users/Charles/Projects/realpha-blog && for f in $(ls -t src/content/blog/*.en.mdx | head -4); do s=$(basename $f .en.mdx); echo "$s zh圖=$(grep -c '/figures/' src/content/blog/$s.zh-TW.mdx) en圖=$(grep -c '/figures/' $f)"; done`
+  英文少於中文＝補跑 `python ~/scripts/blog_auto/figures/en_figures.py auto <slug>`，再 build、push、Substack 用 `publish_draft(send=False)` 重發（不寄第二封信）。
+- 其他 `claude -p` 依賴的排程（`grep -l "claude" ~/scripts/*.bat` 自己列），同樣看產物。
+**BlogStuckWatch 不管這個**：它只看「跑超過 45 分鐘」，不看「跑完但少東西」。
+**根本規矩**：靠 Claude 的機械步驟一律要有跨家備援（codex）＋**產物數量閘**（做完數一數，少了就通知）；只有備援沒有閘＝備援壞了一樣沒人知道（09-07 第二次就是這樣）。
+
 ### 3. 歸政（額度回來了）— **一個指令**
 ```bash
 lead reclaim
