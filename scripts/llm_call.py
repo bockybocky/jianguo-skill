@@ -71,6 +71,14 @@ QUOTA_EVIDENCE_PATH = SHARED_DIR / "quota_evidence.jsonl"
 PENDING_FOR_CC_PATH = SHARED_DIR / "pending_for_cc.md"
 
 TIMEOUT_S = 120
+# 2026-08-09：長提示的每車道預算要按提示長度放大。
+# 病理：lunjian 抽卡的提示是 7.5K–20K 字，四條車道都在 120s 被砍 → ok=false
+# 「全鏈死」，2026-08-04..08-08 連 6 天沒摘要。實測（重放 08-08 那份 11,536 字
+# 的提示）claude 車道要 263.8s 才回完整 JSON array——不是金鑰過期也不是模型下架，
+# 四條車道當下用短提示都秒回 PONG，純粹是預算不夠。
+# 短提示維持 120s（別讓死掉的車道拖久才 failover）。
+TIMEOUT_MAX_S = 600
+TIMEOUT_CHARS_PER_S = 40
 EXIT_ALL_DEAD = 3
 BASE_ORDER = ["claude", "codex", "gemini", "grok"]
 VALID_LEADERS = {"CC", "CODEX", "GROK", "NONE"}
@@ -117,6 +125,12 @@ def _bash_bin() -> str:
                 return p
         return "bash"
     return "bash"
+
+
+def _lane_timeout(prompt: str) -> int:
+    """Per-lane budget in seconds, scaled by prompt size (see TIMEOUT_MAX_S note)."""
+    scaled = len(prompt) // TIMEOUT_CHARS_PER_S + 60
+    return max(TIMEOUT_S, min(TIMEOUT_MAX_S, scaled))
 
 
 def _skip_set() -> set[str]:
@@ -210,6 +224,7 @@ def _run_captured(cmd: list[str], *, input_text: str | None, timeout: int) -> tu
 
 
 def _try_claude(prompt: str) -> tuple[bool, str]:
+    timeout_s = _lane_timeout(prompt)
     env = os.environ.copy()
     env["CLAUDE_HOOK_BYPASS"] = "1"
     cmd = [
@@ -232,7 +247,7 @@ def _try_claude(prompt: str) -> tuple[bool, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=TIMEOUT_S,
+            timeout=timeout_s,
             shell=False,
             env=env,
         )
@@ -242,7 +257,7 @@ def _try_claude(prompt: str) -> tuple[bool, str]:
         err = (r.stderr or r.stdout or "")[:400]
         return False, f"rc={r.returncode}: {err}"
     except subprocess.TimeoutExpired:
-        return False, f"timeout {TIMEOUT_S}s"
+        return False, f"timeout {timeout_s}s"
     except FileNotFoundError as e:
         return False, f"not found: {e}"
     except OSError as e:
@@ -250,13 +265,14 @@ def _try_claude(prompt: str) -> tuple[bool, str]:
 
 
 def _try_codex(prompt: str) -> tuple[bool, str]:
+    timeout_s = _lane_timeout(prompt)
     fd, out_path = tempfile.mkstemp(prefix="llm_call_codex_", suffix=".txt")
     os.close(fd)
     try:
         cmd = [_codex_bin(), "exec", "--sandbox", "read-only",
                "--skip-git-repo-check", "-o", out_path, "-"]
         r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", timeout=TIMEOUT_S,
+                            encoding="utf-8", errors="replace", timeout=timeout_s,
                             shell=False, cwd=str(SCRIPTS_DIR))
         if r.returncode == 0:
             try:
@@ -269,7 +285,7 @@ def _try_codex(prompt: str) -> tuple[bool, str]:
         err = (r.stderr or r.stdout or "")[:400]
         return False, "rc=" + str(r.returncode) + ": " + err
     except subprocess.TimeoutExpired:
-        return False, "timeout " + str(TIMEOUT_S) + "s"
+        return False, "timeout " + str(timeout_s) + "s"
     except FileNotFoundError as e:
         return False, "not found: " + str(e)
     except OSError as e:
@@ -332,8 +348,9 @@ def _try_sh_wrapper(script: Path, prompt: str) -> tuple[bool, str]:
         return False, f"missing {script}"
     # Posix path for bash on Windows
     sh_path = str(script).replace("\\", "/")
-    cmd = [_bash_bin(), sh_path, prompt, str(TIMEOUT_S)]
-    return _run_captured(cmd, input_text=None, timeout=TIMEOUT_S + 15)
+    timeout_s = _lane_timeout(prompt)
+    cmd = [_bash_bin(), sh_path, prompt, str(timeout_s)]
+    return _run_captured(cmd, input_text=None, timeout=timeout_s + 15)
 
 
 def run(

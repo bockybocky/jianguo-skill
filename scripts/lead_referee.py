@@ -582,16 +582,6 @@ def build_flip_message(old_leader: str, new_leader: str, reason: str) -> str:
     return f"公司主導權切換：{x}交棒{y}。原因：{reason_zh}。"
 
 
-def notify_voice(text: str) -> None:
-    try:
-        if SCRIPTS_DIR not in sys.path:
-            sys.path.insert(0, SCRIPTS_DIR)
-        from voice_alert import speak  # type: ignore
-        speak(text)
-    except Exception as e:
-        print(f"notify_voice failed: {e}", file=sys.stderr)
-
-
 def notify_discord(text: str) -> None:
     try:
         now = now_iso()
@@ -621,11 +611,7 @@ def notify_broadcast(text: str) -> None:
 
 
 def notify_all(text: str) -> None:
-    """Fire all three channels fail-quiet."""
-    try:
-        notify_voice(text)
-    except Exception as e:
-        print(f"notify_voice outer: {e}", file=sys.stderr)
+    """Fire all channels fail-quiet."""
     try:
         notify_discord(text)
     except Exception as e:
@@ -639,6 +625,63 @@ def notify_all(text: str) -> None:
 # ---------------------------------------------------------------------------
 # Evaluation cycle
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# 監國 v2 掛鉤（2026-09-06）：①CodexBar 餵證據 ②翻牌時開／關看守隔離區
+# 兩個都 fail-open：任何例外只記 messages，不影響裁判本體。測試用 LEAD_V2_HOOKS=0 關掉。
+# ---------------------------------------------------------------------------
+
+# 正式狀態檔路徑在 import 時凍住。測試會把 STATE_PATH 換成暫存檔模擬翻牌；
+# 那時掛鉤若照跑，會對「真」系統開看守期（2026-09-07 06:30 實證：自動掃測試的排程沒帶
+# LEAD_V2_HOOKS=0，test_lead_referee.py 一翻牌就鎖了 3411 個真檔，直到 10:06 才被發現）。
+# 所以不只看環境變數：狀態檔不是正式那一份，掛鉤一律不動真系統。
+_PROD_STATE_PATH = os.path.normcase(os.path.abspath(STATE_PATH))
+
+
+def _v2_hooks_enabled() -> bool:
+    if os.environ.get("LEAD_V2_HOOKS", "1") == "0":
+        return False
+    return os.path.normcase(os.path.abspath(STATE_PATH)) == _PROD_STATE_PATH
+
+
+def ingest_external_evidence(summary: dict) -> None:
+    """裁判每輪先把 CodexBar 讀數翻成證據（quota_evidence_feed.py），補上 17 支不走 llm_call 的排程盲區。"""
+    if not _v2_hooks_enabled():
+        return
+    try:
+        import quota_evidence_feed  # 同目錄
+        written = quota_evidence_feed.run()
+        if written:
+            summary["messages"].append(f"codexbar feed: 寫入 {len(written)} 筆證據")
+    except Exception as e:  # noqa: BLE001
+        summary["messages"].append(f"codexbar feed 失敗（忽略）: {e}")
+
+
+def on_leader_change(old_leader: str, new_leader: str, summary: Optional[dict] = None) -> None:
+    """CC 交出主導權 → 開看守期（隔離區＋禁區唯讀＋接棒簡報）；CC 收回 → 結束看守期（解鎖＋比對＋報告）。"""
+    if not _v2_hooks_enabled() or old_leader == new_leader:
+        return
+    here = os.path.dirname(os.path.abspath(__file__))
+    py = sys.executable
+    cmds: list[list[str]] = []
+    if old_leader == "CC" and new_leader != "CC":
+        cmds.append([py, os.path.join(here, "regency.py"), "start", "--leader", new_leader])
+        cmds.append([py, os.path.join(here, "lead.py"), "handoff"])
+    elif new_leader == "CC" and old_leader != "CC":
+        cmds.append([py, os.path.join(here, "regency.py"), "end"])
+    for c in cmds:
+        try:
+            r = subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+            line = (r.stdout or r.stderr or "").strip().splitlines()
+            msg = f"v2 hook {os.path.basename(c[1])} {c[2]}: exit={r.returncode} {line[-1] if line else ''}"
+        except Exception as e:  # noqa: BLE001
+            msg = f"v2 hook {os.path.basename(c[1])} 失敗（忽略）: {e}"
+        if summary is not None:
+            summary["messages"].append(msg)
+        else:
+            print(msg)
+
 
 def evaluate_cycle(dry_run: bool = False) -> dict:
     """
@@ -676,6 +719,8 @@ def evaluate_cycle(dry_run: bool = False) -> dict:
     mode = state.get("mode", "AUTO")
     now = datetime.now().astimezone()
 
+    if not dry_run:
+        ingest_external_evidence(summary)
     last_ts = read_sidecar()
     evidence = read_evidence(now=now, last_processed_ts=last_ts)
 
@@ -864,6 +909,7 @@ def evaluate_cycle(dry_run: bool = False) -> dict:
             if notify_text:
                 notify_all(notify_text)
                 summary["messages"].append(f"notified: {notify_text}")
+            on_leader_change(old_leader, new_state.get("leader", old_leader), summary)
         else:
             summary["messages"].append("write abandoned (epoch mismatch)")
             summary["action"] = "write_abandoned"
@@ -923,6 +969,7 @@ def force_probe(engine: str) -> int:
     new_state["since"] = now_iso()
 
     if write_state(new_state, expected_epoch):
+        on_leader_change(old_leader, new_state.get("leader", old_leader))
         msg = build_flip_message(old_leader, target, "probe_restored")
         notify_all(msg)
         print(f"probe {engine}: OK -> leader={target}")
@@ -957,6 +1004,7 @@ def force_take(engine: str) -> int:
     if write_state(new_state, expected_epoch):
         if old_leader != target:
             notify_all(build_flip_message(old_leader, target, "manual"))
+            on_leader_change(old_leader, target)
         print(f"take: leader={target} mode=LOCKED（自動裁決已鎖，解鎖用 --unlock）")
     else:
         print("take: write abandoned (epoch mismatch)，請重試")

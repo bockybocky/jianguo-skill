@@ -14,6 +14,10 @@ import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 
+# 本檔會模擬翻牌；沒關掉 v2 掛鉤會對真系統開看守期（2026-09-07 06:30 實證）。
+# 裁判本身也有「狀態檔不是正式那份就不動」的保險，這行是第二道。
+os.environ.setdefault("LEAD_V2_HOOKS", "0")
+
 import lead_referee as lr
 
 
@@ -496,8 +500,7 @@ class TestProbeFunctionsCmd(LeadRefereeTestBase):
 class TestNotifications(LeadRefereeTestBase):
     def test_notify_broadcast_writes(self):
         self.notify_all.stop()
-        with mock.patch.object(lr, "notify_voice"), \
-             mock.patch.object(lr, "notify_discord"):
+        with mock.patch.object(lr, "notify_discord"):
             lr.notify_all("測試訊息")
         self.assertTrue(os.path.exists(self.broadcast_path))
         with open(self.broadcast_path, "r", encoding="utf-8") as f:

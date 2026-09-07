@@ -22,14 +22,29 @@ Jianguo (監國, "regency" — the crown prince governs while the king is away, 
 - **Multi-terminal aware.** Session-start and per-prompt hooks surface "regency in progress" warnings in every terminal, because parallel terminals share one quota pool and die together.
 - **Drill-tested.** The included drill (inject fake evidence → flip → caretaker dispatch → probe → restore) caught a real bug on day one: a stale cooldown estimate after restoration made the dispatcher skip the restored leader. Fixed with a double guard (referee clears estimates on restore; dispatcher never cooldown-skips the current leader).
 
+## v2 (2026-09): caretaker sandbox + quota evidence feed
+
+Two months of v1 in production showed the automatic flip almost never fired, and handing work back was painful. Root causes and fixes:
+
+| v1 pain | Real cause (from the logs) | v2 fix |
+|---|---|---|
+| Flip never triggered; every takeover was manual `lead take` | Only scripts routed through `llm_call.py` reported quota evidence; most scheduled jobs called `claude -p` directly, so the referee was blind | `quota_evidence_feed.py`: each referee tick reads the local quota dashboard (CodexBar) and converts "5-hour window exhausted" into hard evidence, including the reset time, so the restore probe fires on time |
+| The caretaker agent was hard to work with | The handoff bundle was 2 KB: one handoff note and one constraint line | Handoff bundle v2: sandbox path + full caretaker rules (`regency_rules.md`) + the current quota line + handoff + queued items |
+| Restoring was messy | Two agents wrote the same ledgers (decision IDs collided three times); the primary had to hunt for what changed | `regency.py`: a per-regency **sandbox** (`regency/<date>/work/`), OS-level read-only locks on protected zones (decision ledger / config / rules / skills / memory / handoff), a snapshot before and a diff after → `RECLAIM_REPORT.md` listing added / modified / deleted files. `lead reclaim` does probe → flip back → end regency → print the report in one command |
+
+Also new: the referee refuses to open a regency while the primary is in charge unless `--force` (a scheduled test run once triggered a real lockdown), and hooks only fire on the production state file.
+
 ## Contents
 
 | File | Role |
 |---|---|
-| `SKILL.md` | The Claude Code skill: operator runbook (status / takeover / manual override / restore / drill / troubleshooting), in Traditional Chinese |
-| `scripts/lead_referee.py` | The referee — sole writer of the leadership state machine (28 tests) |
-| `scripts/llm_call.py` | Leader-aware LLM dispatch wrapper with caretaker prefix injection (9 tests) |
-| `scripts/lead.py` | Human CLI: `lead status / take / auto / probe / handoff` |
+| `SKILL.md` | The Claude Code skill: operator runbook v2 (status / takeover / manual override / reclaim / drill / troubleshooting), in Traditional Chinese |
+| `scripts/lead_referee.py` | The referee — sole writer of the leadership state machine; v2 adds the evidence feed tick and the regency hooks |
+| `scripts/regency.py` | v2 caretaker sandbox: `start / status / end`, protected-zone locks, snapshot + reclaim report |
+| `scripts/quota_evidence_feed.py` | v2 quota dashboard → evidence adapter (with reset-time carry-over) |
+| `scripts/llm_call.py` | Leader-aware LLM dispatch wrapper with caretaker prefix injection |
+| `scripts/lead.py` | Human CLI: `lead status / take / auto / probe / handoff / reclaim` |
+| `regency_rules.md` | The caretaker rules handed to the acting agent (what it may do, where it may write, what is frozen) |
 | `scripts/test_*.py` | Test suites (stdlib-only, fully mocked) |
 
 ## Adapting to your environment
